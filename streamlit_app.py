@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 # -------------------------------------------------
 st.set_page_config(page_title="HDFC Sky – Funnel Lift & Lead Quality", layout="wide")
 
-st.title("HDFC Sky — App Funnel Lift & Lead Quality Analyzer (v2)")
+st.title("HDFC Sky — App Funnel Lift & Lead Quality Analyzer (v2, fixed)")
 st.markdown("""
 This app analyses **app funnel performance** (Installs → KYC → Trade → Esign) and computes:
 
@@ -30,7 +30,7 @@ def parse_dates(df, date_col="Date"):
     Robust date parser for your case:
     - Some values are stored as actual datetimes, some as text.
     - All are logically month/day/year (m/d/yyyy, mm/dd/yyyy, etc.).
-    
+
     Strategy:
     1. Convert EVERYTHING to string (ignoring existing dtype).
     2. Strip spaces.
@@ -40,13 +40,12 @@ def parse_dates(df, date_col="Date"):
     if date_col not in df.columns:
         raise ValueError(f"Date column '{date_col}' not found in data.")
 
-    # 1) Force everything to text first (kills the “some as date, some as text” problem)
     s = df[date_col].astype(str).str.strip()
 
-    # 2) Main parse: treat as month/day/year
+    # Main parse: month/day/year style
     dt = pd.to_datetime(s, dayfirst=False, errors="coerce")
 
-    # 3) Fallback for any odd strings that failed above
+    # Fallback: let pandas try a generic parse where main failed
     dt_fallback = pd.to_datetime(s, errors="coerce")
     dt = dt.where(~dt.isna(), dt_fallback)
 
@@ -62,6 +61,7 @@ def safe_to_numeric(series):
         series.astype(str).str.replace(r"[,\s%₹]", "", regex=True).str.strip(),
         errors="coerce"
     )
+
 
 def compute_funnel_metrics(df, installs_col, kyc_col, esign_col,
                            trade_user_col, trade_user_fallback_cols,
@@ -82,7 +82,6 @@ def compute_funnel_metrics(df, installs_col, kyc_col, esign_col,
     else:
         trade_users = 0
         if trade_user_fallback_cols:
-            # sum across fallback trade columns (unique users)
             trade_users = df[trade_user_fallback_cols].sum(axis=1).sum()
 
     out["days"] = days_in_period
@@ -110,11 +109,13 @@ def compute_funnel_metrics(df, installs_col, kyc_col, esign_col,
 
     return out
 
+
 def compute_lift_relative(pre_val, camp_val):
     """Compute percentage lift (campaign vs pre) in percent units."""
     if pre_val is None or np.isnan(pre_val) or pre_val == 0:
         return np.nan
     return (camp_val / pre_val - 1.0) * 100.0
+
 
 def format_pct(x):
     return f"{x:.2f}%" if pd.notna(x) else "NA"
@@ -137,7 +138,7 @@ if uploaded_file is not None:
 else:
     try:
         df_raw = pd.read_csv(default_path)
-        st.sidebar.success(f"Loaded default file from: {default_path}")
+        st.sidebar.success(f"Loaded default file from: /mnt/data/HDFC_SKY_Android_Organic_Paid_13_11_25.csv")
     except Exception:
         st.sidebar.error("Could not load default file. Please upload a CSV.")
         st.stop()
@@ -145,6 +146,7 @@ else:
 # -------------------------------------------------
 # Basic cleaning & column detection
 # -------------------------------------------------
+df_raw["Date"] = df_raw["Date"].astype(str)  # force text for safety
 df = parse_dates(df_raw.copy(), date_col="Date")
 
 # Detect key columns
@@ -200,18 +202,47 @@ for col in numeric_cols_to_clean:
         df[col] = safe_to_numeric(df[col]).fillna(0)
 
 # -------------------------------------------------
+# Media source detection & media_group classification
+# (do this BEFORE creating df_pre / df_camp)
+# -------------------------------------------------
+# Try to find "Media Source (pid)" flexibly
+media_col = None
+for c in df.columns:
+    cl = c.lower()
+    if "media source" in cl and "pid" in cl:
+        media_col = c
+        break
+if media_col is None:
+    for c in df.columns:
+        if "media source" in c.lower():
+            media_col = c
+            break
+
+if media_col is not None:
+    def classify_media(ms):
+        s = str(ms).lower()
+        if "paid" in s:
+            return "Paid"
+        if "organic" in s:
+            return "Organic"
+        return "Other"
+    df["media_group"] = df[media_col].apply(classify_media)
+else:
+    st.sidebar.info("No media source column found — Paid vs Organic views will be disabled.")
+
+# -------------------------------------------------
 # Sidebar: Filters & Campaign window with time normalisation
 # -------------------------------------------------
 st.sidebar.header("Filters & Campaign Window")
 
-media_col = "Media Source (pid)"
-if media_col in df.columns:
+# Optional filter by media source value itself
+if media_col is not None:
     media_options = ["All"] + sorted(df[media_col].dropna().unique().tolist())
-    media_choice = st.sidebar.selectbox("Filter by Media Source (pid)", options=media_options, index=0)
+    media_choice = st.sidebar.selectbox("Filter by Media Source (raw)", options=media_options, index=0)
     if media_choice != "All":
         df = df[df[media_col] == media_choice]
 else:
-    st.sidebar.info("No 'Media Source (pid)' column found. Using all rows.")
+    st.sidebar.info("No media source column found for raw filtering.")
 
 min_date = df["Date"].min()
 max_date = df["Date"].max()
@@ -245,7 +276,7 @@ campaign_end_dt = pd.to_datetime(campaign_end)
 
 equal_length_pre = st.sidebar.checkbox("Use equal-length pre period", value=True)
 
-# Define pre & campaign masks
+# Define campaign mask & slice
 camp_mask = (df["Date"] >= campaign_start_dt) & (df["Date"] <= campaign_end_dt)
 df_camp = df[camp_mask]
 
@@ -255,13 +286,17 @@ if df_camp.empty:
 
 campaign_days = (campaign_end_dt - campaign_start_dt).days + 1
 
+# Define pre-period mask & slice
 if equal_length_pre:
     pre_end_dt = campaign_start_dt - pd.Timedelta(days=1)
     pre_start_dt = pre_end_dt - pd.Timedelta(days=campaign_days - 1)
     if pre_start_dt < min_date:
         pre_start_dt = min_date
         pre_days = (pre_end_dt - pre_start_dt).days + 1
-        st.warning(f"Not enough data before campaign for full equal-length pre period. Using truncated pre: {pre_start_dt.date()} → {pre_end_dt.date()} ({pre_days} days).")
+        st.warning(
+            f"Not enough data before campaign for full equal-length pre period. "
+            f"Using truncated pre: {pre_start_dt.date()} → {pre_end_dt.date()} ({pre_days} days)."
+        )
     else:
         pre_days = campaign_days
     pre_mask = (df["Date"] >= pre_start_dt) & (df["Date"] <= pre_end_dt)
@@ -396,7 +431,6 @@ with tab_summary:
 with tab_trends:
     st.header("Daily Conversion Rate Trends")
 
-    # Build daily aggregated view
     daily_cols = [installs_col]
     if kyc_unique_col: daily_cols.append(kyc_unique_col)
     if esign_unique_col: daily_cols.append(esign_unique_col)
@@ -406,15 +440,13 @@ with tab_trends:
 
     df_daily = df.groupby("Date")[daily_cols].sum().reset_index()
 
-    # Compute CRs daily
     df_daily["cr_install_to_kyc"] = df_daily[kyc_unique_col] / df_daily[installs_col] if kyc_unique_col else np.nan
-    if trade_any_unique_col:
-        df_daily["cr_kyc_to_trade"] = df_daily[trade_any_unique_col] / df_daily[kyc_unique_col].replace(0, np.nan) if kyc_unique_col else np.nan
+    if trade_any_unique_col and kyc_unique_col:
+        df_daily["cr_kyc_to_trade"] = df_daily[trade_any_unique_col] / df_daily[kyc_unique_col].replace(0, np.nan)
     else:
         df_daily["cr_kyc_to_trade"] = np.nan
     df_daily["cr_install_to_esign"] = df_daily[esign_unique_col] / df_daily[installs_col] if esign_unique_col else np.nan
 
-    # Highlight period
     st.line_chart(
         df_daily.set_index("Date")[["cr_install_to_kyc", "cr_kyc_to_trade", "cr_install_to_esign"]],
         height=400
@@ -436,20 +468,9 @@ You can visually check if **campaign period** ({campaign_start_dt.date()} → {c
 with tab_paid_org:
     st.header("Paid vs Organic — Funnel Performance")
 
-    if media_col not in df.columns:
-        st.info("No 'Media Source (pid)' column — cannot split Paid vs Organic.")
+    if "media_group" not in df.columns:
+        st.info("No media_group information available — cannot split Paid vs Organic.")
     else:
-        # heuristic: group Paid vs Organic vs Other
-        def classify_media(ms):
-            s = str(ms).lower()
-            if "paid" in s:
-                return "Paid"
-            if "organic" in s:
-                return "Organic"
-            return "Other"
-
-        df["media_group"] = df[media_col].apply(classify_media)
-
         results = []
         for group in ["Paid", "Organic", "Other"]:
             df_g_pre = df_pre[df_pre["media_group"] == group]
@@ -524,8 +545,8 @@ Use this to answer:
 with tab_media:
     st.header("Media Source Leaderboard (Campaign vs Pre)")
 
-    if media_col not in df.columns:
-        st.info("No 'Media Source (pid)' column — cannot compute leaderboard.")
+    if media_col is None:
+        st.info("No media source column — cannot compute leaderboard.")
     else:
         media_list = df[media_col].dropna().unique().tolist()
         rows = []
@@ -578,7 +599,6 @@ with tab_media:
         else:
             ms_df = pd.DataFrame(rows)
 
-            # sort by Campaign Install→KYC CR descending
             ms_df_sorted = ms_df.sort_values(by="Campaign Install→KYC CR (%)", ascending=False)
 
             ms_df_display = ms_df_sorted.copy()
