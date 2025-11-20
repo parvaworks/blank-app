@@ -1,59 +1,52 @@
-# streamlit_hdfc_funnel_app.py
-
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title="HDFC Sky – Funnel Lift Analyzer", layout="wide")
+# -------------------------------------------------
+# Page config
+# -------------------------------------------------
+st.set_page_config(page_title="HDFC Sky – Funnel Lift & Lead Quality", layout="wide")
 
-st.title("HDFC Sky — App Funnel Lift & Lead Quality Analyzer")
+st.title("HDFC Sky — App Funnel Lift & Lead Quality Analyzer (v2)")
 st.markdown("""
-This app analyses **app funnel performance** (Installs → KYC → Trade → Esign) and computes
-**conversion rates & percentage lifts** between **Pre** and **Campaign** periods.
+This app analyses **app funnel performance** (Installs → KYC → Trade → Esign) and computes:
 
-Key ideas:
-- Ignore **revenue** and INR fields.
-- Treat **events with `s2s` in the name as trade-related** (e.g., `any_trade_s2s`, `equity_trade_s2s`).
-- Focus on **funnel quality**: KYC, trades, e-sign.
+- **Conversion rates & % lift** for:
+  - Install → KYC  
+  - KYC → Trade  
+  - Install → Esign  
+- **Time-normalised** comparisons (equal-length pre vs campaign, per-day metrics).
+- **Daily CR trends**, **Paid vs Organic**, **media source leaderboard**, and **trade-related s2s event breakdown**.
 
-You’ll get:
-- A **conversion summary** for Pre vs Campaign.
-- A **percentage lift table** for:
-  - Install → KYC
-  - KYC → Trade
-  - Install → Esign
+**Revenue / INR fields are intentionally ignored.**
 """)
 
-# ----------------------------
+# -------------------------------------------------
 # Helper functions
-# ----------------------------
-
+# -------------------------------------------------
 def parse_dates(df, date_col="Date"):
-    """Parse Date column robustly."""
+    """Parse Date column robustly and sort."""
     if date_col not in df.columns:
         raise ValueError(f"Date column '{date_col}' not found in data.")
-    try:
-        df[date_col] = pd.to_datetime(df[date_col], format="%d/%m/%Y", dayfirst=True, errors="coerce")
-    except Exception:
-        df[date_col] = pd.to_datetime(df[date_col], dayfirst=True, errors="coerce")
+    df[date_col] = pd.to_datetime(df[date_col], dayfirst=True, errors="coerce")
     df = df.dropna(subset=[date_col])
     df = df.sort_values(date_col).reset_index(drop=True)
     return df
 
-
 def safe_to_numeric(series):
-    """Coerce a pandas Series to numeric, stripping commas, spaces, % and ₹."""
+    """Coerce a Series to numeric, stripping commas, spaces, % and ₹."""
     return pd.to_numeric(
         series.astype(str).str.replace(r"[,\s%₹]", "", regex=True).str.strip(),
         errors="coerce"
     )
 
-
-def compute_funnel_metrics(df, installs_col, kyc_col, esign_col, trade_user_col, trade_user_fallback_cols):
+def compute_funnel_metrics(df, installs_col, kyc_col, esign_col,
+                           trade_user_col, trade_user_fallback_cols,
+                           days_in_period):
     """
     Compute aggregate funnel metrics for a given dataframe slice.
-    Returns dict with installs, kyc_users, esign_users, trade_users and conversions.
+    Returns dict with totals, per-day metrics, and conversion rates.
     """
     out = {}
 
@@ -67,36 +60,51 @@ def compute_funnel_metrics(df, installs_col, kyc_col, esign_col, trade_user_col,
     else:
         trade_users = 0
         if trade_user_fallback_cols:
+            # sum across fallback trade columns (unique users)
             trade_users = df[trade_user_fallback_cols].sum(axis=1).sum()
 
+    out["days"] = days_in_period
     out["installs"] = installs
     out["kyc_users"] = kyc_users
     out["esign_users"] = esign_users
     out["trade_users"] = trade_users
 
-    # Conversion rates (as proportions)
+    # Per-day metrics
+    if days_in_period > 0:
+        out["installs_per_day"] = installs / days_in_period
+        out["kyc_per_day"] = kyc_users / days_in_period
+        out["esign_per_day"] = esign_users / days_in_period
+        out["trade_per_day"] = trade_users / days_in_period
+    else:
+        out["installs_per_day"] = np.nan
+        out["kyc_per_day"] = np.nan
+        out["esign_per_day"] = np.nan
+        out["trade_per_day"] = np.nan
+
+    # Conversion rates (proportions)
     out["cr_install_to_kyc"] = (kyc_users / installs) if installs > 0 else np.nan
     out["cr_kyc_to_trade"] = (trade_users / kyc_users) if kyc_users > 0 else np.nan
     out["cr_install_to_esign"] = (esign_users / installs) if installs > 0 else np.nan
 
     return out
 
-
-def compute_lift(pre_val, camp_val):
-    """Compute percentage lift (campaign vs pre)."""
+def compute_lift_relative(pre_val, camp_val):
+    """Compute percentage lift (campaign vs pre) in percent units."""
     if pre_val is None or np.isnan(pre_val) or pre_val == 0:
         return np.nan
-    return (camp_val / pre_val - 1) * 100.0
+    return (camp_val / pre_val - 1.0) * 100.0
+
+def format_pct(x):
+    return f"{x:.2f}%" if pd.notna(x) else "NA"
 
 
-# ----------------------------
+# -------------------------------------------------
 # Sidebar: Data input
-# ----------------------------
-
+# -------------------------------------------------
 st.sidebar.header("Data Input")
 
 uploaded_file = st.sidebar.file_uploader(
-    "Upload app funnel CSV (e.g. HDFC_SKY_Android_Organic_Paid_13_11_25.csv)",
+    "Upload app funnel CSV",
     type=["csv"]
 )
 
@@ -108,39 +116,31 @@ else:
     try:
         df_raw = pd.read_csv(default_path)
         st.sidebar.success(f"Loaded default file from: {default_path}")
-    except Exception as e:
+    except Exception:
         st.sidebar.error("Could not load default file. Please upload a CSV.")
         st.stop()
 
-# ----------------------------
+# -------------------------------------------------
 # Basic cleaning & column detection
-# ----------------------------
-
-# 1. Parse dates
+# -------------------------------------------------
 df = parse_dates(df_raw.copy(), date_col="Date")
 
-# 2. Filter out obviously revenue-related columns (we won't use them)
-revenue_like = [c for c in df.columns if "sales in inr" in c.lower() or "total revenue" in c.lower() or "roi" in c.lower() or "arpu" in c.lower()]
-# We won't drop them (in case user wants to explore later) but we won't touch them.
-
-# 3. Key columns
+# Detect key columns
 installs_col = "Installs"
+
 kyc_unique_col = None
 esign_unique_col = None
 trade_any_unique_col = None
 trade_unique_fallback_cols = []
 
-# Detect KYC
 kyc_candidates = [c for c in df.columns if "verify_kyc" in c.lower() and "unique users" in c.lower()]
 if kyc_candidates:
     kyc_unique_col = kyc_candidates[0]
 
-# Detect Esign
 esign_candidates = [c for c in df.columns if "esign" in c.lower() and "unique users" in c.lower()]
 if esign_candidates:
     esign_unique_col = esign_candidates[0]
 
-# Detect trade-related s2s events
 s2s_unique_cols = [c for c in df.columns if "s2s" in c.lower() and "unique users" in c.lower()]
 
 for c in s2s_unique_cols:
@@ -148,13 +148,12 @@ for c in s2s_unique_cols:
         trade_any_unique_col = c
 
 if trade_any_unique_col is None:
-    # Fallback: any *_trade_s2s (Unique users)
     trade_unique_fallback_cols = [
         c for c in s2s_unique_cols
         if any(x in c.lower() for x in ["equity_trade_s2s", "fno_trade_s2s", "etf_trade_s2s", "mtf_trade_s2s"])
     ]
 
-# Sanity messages
+# Sanity checks
 if installs_col not in df.columns:
     st.error(f"Cannot find '{installs_col}' column. Please ensure the file has this column.")
     st.stop()
@@ -166,26 +165,23 @@ if esign_unique_col is None:
 if trade_any_unique_col is None and not trade_unique_fallback_cols:
     st.warning("Could not find any trade-related s2s (Unique users) columns. Trade metrics will be NaN.")
 
-# 4. Coerce relevant numeric columns
+# Coerce key numeric columns
 numeric_cols_to_clean = [installs_col]
 if kyc_unique_col: numeric_cols_to_clean.append(kyc_unique_col)
 if esign_unique_col: numeric_cols_to_clean.append(esign_unique_col)
 if trade_any_unique_col: numeric_cols_to_clean.append(trade_any_unique_col)
 numeric_cols_to_clean.extend(trade_unique_fallback_cols)
-
-numeric_cols_to_clean = list(dict.fromkeys(numeric_cols_to_clean))  # de-duplicate
+numeric_cols_to_clean = list(dict.fromkeys(numeric_cols_to_clean))  # de-dup
 
 for col in numeric_cols_to_clean:
     if col in df.columns:
         df[col] = safe_to_numeric(df[col]).fillna(0)
 
-# ----------------------------
-# Sidebar: Filters & Campaign window
-# ----------------------------
-
+# -------------------------------------------------
+# Sidebar: Filters & Campaign window with time normalisation
+# -------------------------------------------------
 st.sidebar.header("Filters & Campaign Window")
 
-# Media Source filter (e.g. Paid / Organic)
 media_col = "Media Source (pid)"
 if media_col in df.columns:
     media_options = ["All"] + sorted(df[media_col].dropna().unique().tolist())
@@ -195,18 +191,28 @@ if media_col in df.columns:
 else:
     st.sidebar.info("No 'Media Source (pid)' column found. Using all rows.")
 
-# Campaign date range
 min_date = df["Date"].min()
 max_date = df["Date"].max()
 
 st.sidebar.markdown(f"**Data date range:** {min_date.date()} → {max_date.date()}")
 
-default_start = max_date - pd.Timedelta(days=30)
-if default_start < min_date:
-    default_start = min_date
+default_campaign_end = max_date.date()
+default_campaign_start = (max_date - pd.Timedelta(days=30)).date()
+if default_campaign_start < min_date.date():
+    default_campaign_start = min_date.date()
 
-campaign_start = st.sidebar.date_input("Campaign start date", value=default_start, min_value=min_date.date(), max_value=max_date.date())
-campaign_end = st.sidebar.date_input("Campaign end date", value=max_date.date(), min_value=min_date.date(), max_value=max_date.date())
+campaign_start = st.sidebar.date_input(
+    "Campaign start date",
+    value=default_campaign_start,
+    min_value=min_date.date(),
+    max_value=max_date.date()
+)
+campaign_end = st.sidebar.date_input(
+    "Campaign end date",
+    value=default_campaign_end,
+    min_value=min_date.date(),
+    max_value=max_date.date()
+)
 
 if campaign_start > campaign_end:
     st.sidebar.error("Campaign start date cannot be after end date.")
@@ -215,29 +221,50 @@ if campaign_start > campaign_end:
 campaign_start_dt = pd.to_datetime(campaign_start)
 campaign_end_dt = pd.to_datetime(campaign_end)
 
-# Define periods
-pre_mask = df["Date"] < campaign_start_dt
-camp_mask = (df["Date"] >= campaign_start_dt) & (df["Date"] <= campaign_end_dt)
+equal_length_pre = st.sidebar.checkbox("Use equal-length pre period", value=True)
 
-df_pre = df[pre_mask]
+# Define pre & campaign masks
+camp_mask = (df["Date"] >= campaign_start_dt) & (df["Date"] <= campaign_end_dt)
 df_camp = df[camp_mask]
 
-if df_pre.empty:
-    st.warning("No 'Pre' period data before campaign start date. Consider choosing an earlier start date.")
 if df_camp.empty:
     st.warning("No data in campaign window. Adjust the date range.")
     st.stop()
 
+campaign_days = (campaign_end_dt - campaign_start_dt).days + 1
+
+if equal_length_pre:
+    pre_end_dt = campaign_start_dt - pd.Timedelta(days=1)
+    pre_start_dt = pre_end_dt - pd.Timedelta(days=campaign_days - 1)
+    if pre_start_dt < min_date:
+        pre_start_dt = min_date
+        pre_days = (pre_end_dt - pre_start_dt).days + 1
+        st.warning(f"Not enough data before campaign for full equal-length pre period. Using truncated pre: {pre_start_dt.date()} → {pre_end_dt.date()} ({pre_days} days).")
+    else:
+        pre_days = campaign_days
+    pre_mask = (df["Date"] >= pre_start_dt) & (df["Date"] <= pre_end_dt)
+else:
+    pre_mask = df["Date"] < campaign_start_dt
+    pre_days = (campaign_start_dt - df[pre_mask]["Date"].min()).days if pre_mask.any() else 0
+
+df_pre = df[pre_mask]
+
+if df_pre.empty:
+    st.warning("No pre period data based on current settings. Consider adjusting dates or turning off equal-length mode.")
+
 st.markdown(f"""
 ### Periods used for lift analysis
-- **Pre period:** all rows with Date < **{campaign_start_dt.date()}**
-- **Campaign period:** rows with **{campaign_start_dt.date()} ≤ Date ≤ {campaign_end_dt.date()}**
+
+- **Campaign period:** {campaign_start_dt.date()} → {campaign_end_dt.date()} (**{campaign_days} days**)
+- **Pre period:** 
+  - {'Equal-length mode' if equal_length_pre else 'All dates before campaign'}
+  - Actual pre range: {df_pre['Date'].min().date() if not df_pre.empty else 'NA'} → {df_pre['Date'].max().date() if not df_pre.empty else 'NA'}
+  - Days used: **{pre_days}**
 """)
 
-# ----------------------------
+# -------------------------------------------------
 # Compute funnel metrics for Pre vs Campaign
-# ----------------------------
-
+# -------------------------------------------------
 pre_metrics = compute_funnel_metrics(
     df_pre,
     installs_col=installs_col,
@@ -245,6 +272,7 @@ pre_metrics = compute_funnel_metrics(
     esign_col=esign_unique_col,
     trade_user_col=trade_any_unique_col,
     trade_user_fallback_cols=trade_unique_fallback_cols,
+    days_in_period=pre_days,
 )
 
 camp_metrics = compute_funnel_metrics(
@@ -254,92 +282,328 @@ camp_metrics = compute_funnel_metrics(
     esign_col=esign_unique_col,
     trade_user_col=trade_any_unique_col,
     trade_user_fallback_cols=trade_unique_fallback_cols,
+    days_in_period=campaign_days,
 )
 
-# ----------------------------
-# Display: raw funnel metrics
-# ----------------------------
-
-st.header("Funnel Summary — Pre vs Campaign")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("Pre period totals")
-    st.metric("Installs", f"{pre_metrics['installs']:.0f}")
-    st.metric("KYC unique users", f"{pre_metrics['kyc_users']:.0f}")
-    st.metric("Trade unique users", f"{pre_metrics['trade_users']:.0f}")
-    st.metric("Esign unique users", f"{pre_metrics['esign_users']:.0f}")
-
-with col2:
-    st.subheader("Campaign period totals")
-    st.metric("Installs", f"{camp_metrics['installs']:.0f}")
-    st.metric("KYC unique users", f"{camp_metrics['kyc_users']:.0f}")
-    st.metric("Trade unique users", f"{camp_metrics['trade_users']:.0f}")
-    st.metric("Esign unique users", f"{camp_metrics['esign_users']:.0f}")
-
-# ----------------------------
-# Conversion rates table
-# ----------------------------
-
-st.subheader("Conversion Rates by Step")
-
-conv_rows = [
-    {
-        "Step": "Install → KYC",
-        "Pre CR (%)": pre_metrics["cr_install_to_kyc"] * 100 if pre_metrics["cr_install_to_kyc"] == pre_metrics["cr_install_to_kyc"] else np.nan,
-        "Campaign CR (%)": camp_metrics["cr_install_to_kyc"] * 100 if camp_metrics["cr_install_to_kyc"] == camp_metrics["cr_install_to_kyc"] else np.nan,
-    },
-    {
-        "Step": "KYC → Trade",
-        "Pre CR (%)": pre_metrics["cr_kyc_to_trade"] * 100 if pre_metrics["cr_kyc_to_trade"] == pre_metrics["cr_kyc_to_trade"] else np.nan,
-        "Campaign CR (%)": camp_metrics["cr_kyc_to_trade"] * 100 if camp_metrics["cr_kyc_to_trade"] == camp_metrics["cr_kyc_to_trade"] else np.nan,
-    },
-    {
-        "Step": "Install → Esign",
-        "Pre CR (%)": pre_metrics["cr_install_to_esign"] * 100 if pre_metrics["cr_install_to_esign"] == pre_metrics["cr_install_to_esign"] else np.nan,
-        "Campaign CR (%)": camp_metrics["cr_install_to_esign"] * 100 if camp_metrics["cr_install_to_esign"] == camp_metrics["cr_install_to_esign"] else np.nan,
-    },
-]
-
-conv_df = pd.DataFrame(conv_rows)
-
-# Compute lift
-conv_df["Lift (%)"] = conv_df.apply(
-    lambda row: compute_lift(row["Pre CR (%)"], row["Campaign CR (%)"]),
-    axis=1
+# -------------------------------------------------
+# Tabs for insights
+# -------------------------------------------------
+tab_summary, tab_trends, tab_paid_org, tab_media, tab_s2s = st.tabs(
+    ["Summary & Lifts", "CR Trends", "Paid vs Organic", "Media Source Leaderboard", "Trade s2s Breakdown"]
 )
 
-# Formatting
-conv_df_display = conv_df.copy()
-for col in ["Pre CR (%)", "Campaign CR (%)", "Lift (%)"]:
-    conv_df_display[col] = conv_df_display[col].map(lambda x: f"{x:.2f}%" if pd.notna(x) else "NA")
+# -------------------------------------------------
+# Tab 1: Summary & Lifts
+# -------------------------------------------------
+with tab_summary:
+    st.header("Funnel Summary — Pre vs Campaign (Time-normalised)")
 
-st.dataframe(conv_df_display, use_container_width=True)
+    col1, col2, col3 = st.columns(3)
 
-st.markdown("""
-**Interpretation:**
-- **Pre CR (%)** – Funnel conversion before the campaign period.
-- **Campaign CR (%)** – Funnel conversion during campaign.
+    with col1:
+        st.subheader("Pre period totals")
+        st.metric("Days", f"{pre_metrics['days']:.0f}")
+        st.metric("Installs", f"{pre_metrics['installs']:.0f}")
+        st.metric("KYC unique users", f"{pre_metrics['kyc_users']:.0f}")
+        st.metric("Trade unique users", f"{pre_metrics['trade_users']:.0f}")
+        st.metric("Esign unique users", f"{pre_metrics['esign_users']:.0f}")
+
+    with col2:
+        st.subheader("Campaign period totals")
+        st.metric("Days", f"{camp_metrics['days']:.0f}")
+        st.metric("Installs", f"{camp_metrics['installs']:.0f}")
+        st.metric("KYC unique users", f"{camp_metrics['kyc_users']:.0f}")
+        st.metric("Trade unique users", f"{camp_metrics['trade_users']:.0f}")
+        st.metric("Esign unique users", f"{camp_metrics['esign_users']:.0f}")
+
+    with col3:
+        st.subheader("Per-day metrics (Pre vs Campaign)")
+        st.metric("Installs/day (Pre)", f"{pre_metrics['installs_per_day']:.1f}")
+        st.metric("Installs/day (Campaign)", f"{camp_metrics['installs_per_day']:.1f}")
+        st.metric("KYC/day (Pre)", f"{pre_metrics['kyc_per_day']:.1f}")
+        st.metric("KYC/day (Campaign)", f"{camp_metrics['kyc_per_day']:.1f}")
+        st.metric("Trade/day (Pre)", f"{pre_metrics['trade_per_day']:.1f}")
+        st.metric("Trade/day (Campaign)", f"{camp_metrics['trade_per_day']:.1f}")
+
+    st.subheader("Conversion Rates by Step & % Lift")
+
+    conv_rows = [
+        {
+            "Step": "Install → KYC",
+            "Pre CR (%)": pre_metrics["cr_install_to_kyc"] * 100 if pd.notna(pre_metrics["cr_install_to_kyc"]) else np.nan,
+            "Campaign CR (%)": camp_metrics["cr_install_to_kyc"] * 100 if pd.notna(camp_metrics["cr_install_to_kyc"]) else np.nan,
+        },
+        {
+            "Step": "KYC → Trade",
+            "Pre CR (%)": pre_metrics["cr_kyc_to_trade"] * 100 if pd.notna(pre_metrics["cr_kyc_to_trade"]) else np.nan,
+            "Campaign CR (%)": camp_metrics["cr_kyc_to_trade"] * 100 if pd.notna(camp_metrics["cr_kyc_to_trade"]) else np.nan,
+        },
+        {
+            "Step": "Install → Esign",
+            "Pre CR (%)": pre_metrics["cr_install_to_esign"] * 100 if pd.notna(pre_metrics["cr_install_to_esign"]) else np.nan,
+            "Campaign CR (%)": camp_metrics["cr_install_to_esign"] * 100 if pd.notna(camp_metrics["cr_install_to_esign"]) else np.nan,
+        },
+    ]
+
+    conv_df = pd.DataFrame(conv_rows)
+    conv_df["Lift (%)"] = conv_df.apply(
+        lambda row: compute_lift_relative(row["Pre CR (%)"], row["Campaign CR (%)"]),
+        axis=1
+    )
+
+    conv_df_display = conv_df.copy()
+    conv_df_display["Pre CR (%)"] = conv_df_display["Pre CR (%)"].map(format_pct)
+    conv_df_display["Campaign CR (%)"] = conv_df_display["Campaign CR (%)"].map(format_pct)
+    conv_df_display["Lift (%)"] = conv_df_display["Lift (%)"].map(format_pct)
+
+    st.dataframe(conv_df_display, use_container_width=True)
+
+    st.markdown("""
+**Reading this table:**
+- **Pre CR (%)** – Funnel conversion in the pre period.
+- **Campaign CR (%)** – Funnel conversion in the campaign period.
 - **Lift (%)** – Relative change: \\((Campaign / Pre − 1) × 100\\).  
-  Positive lift = funnel is getting **more efficient** during the campaign (better lead quality).
+  - Positive lift → **funnel is more efficient** (higher-quality users).  
+  - Negative lift → funnel is less efficient.
 """)
 
-# ----------------------------
-# Optional: trade breakdown (s2s events)
-# ----------------------------
 
-st.header("Trade-related s2s events breakdown")
+# -------------------------------------------------
+# Tab 2: CR Trends
+# -------------------------------------------------
+with tab_trends:
+    st.header("Daily Conversion Rate Trends")
 
-if s2s_unique_cols:
-    s2s_cols_to_show = s2s_unique_cols.copy()
-    st.markdown("Below table shows **unique user counts** for each trade-related `s2s` event in Pre vs Campaign.")
-    s2s_pre = df_pre[s2s_cols_to_show].sum().to_frame(name="Pre unique users")
-    s2s_camp = df_camp[s2s_cols_to_show].sum().to_frame(name="Campaign unique users")
-    s2s_combined = s2s_pre.join(s2s_camp, how="outer").fillna(0)
-    st.dataframe(s2s_combined, use_container_width=True)
-else:
-    st.info("No s2s trade-related unique user columns found to display breakdown.")
+    # Build daily aggregated view
+    daily_cols = [installs_col]
+    if kyc_unique_col: daily_cols.append(kyc_unique_col)
+    if esign_unique_col: daily_cols.append(esign_unique_col)
+    if trade_any_unique_col:
+        daily_cols.append(trade_any_unique_col)
+    daily_cols = list(dict.fromkeys([c for c in daily_cols if c in df.columns]))
+
+    df_daily = df.groupby("Date")[daily_cols].sum().reset_index()
+
+    # Compute CRs daily
+    df_daily["cr_install_to_kyc"] = df_daily[kyc_unique_col] / df_daily[installs_col] if kyc_unique_col else np.nan
+    if trade_any_unique_col:
+        df_daily["cr_kyc_to_trade"] = df_daily[trade_any_unique_col] / df_daily[kyc_unique_col].replace(0, np.nan) if kyc_unique_col else np.nan
+    else:
+        df_daily["cr_kyc_to_trade"] = np.nan
+    df_daily["cr_install_to_esign"] = df_daily[esign_unique_col] / df_daily[installs_col] if esign_unique_col else np.nan
+
+    # Highlight period
+    st.line_chart(
+        df_daily.set_index("Date")[["cr_install_to_kyc", "cr_kyc_to_trade", "cr_install_to_esign"]],
+        height=400
+    )
+
+    st.markdown(f"""
+The chart shows **daily CRs**:
+- Install → KYC  
+- KYC → Trade  
+- Install → Esign  
+
+You can visually check if **campaign period** ({campaign_start_dt.date()} → {campaign_end_dt.date()}) lines up with higher CRs.
+""")
+
+
+# -------------------------------------------------
+# Tab 3: Paid vs Organic
+# -------------------------------------------------
+with tab_paid_org:
+    st.header("Paid vs Organic — Funnel Performance")
+
+    if media_col not in df.columns:
+        st.info("No 'Media Source (pid)' column — cannot split Paid vs Organic.")
+    else:
+        # heuristic: group Paid vs Organic vs Other
+        def classify_media(ms):
+            s = str(ms).lower()
+            if "paid" in s:
+                return "Paid"
+            if "organic" in s:
+                return "Organic"
+            return "Other"
+
+        df["media_group"] = df[media_col].apply(classify_media)
+
+        results = []
+        for group in ["Paid", "Organic", "Other"]:
+            df_g_pre = df_pre[df_pre["media_group"] == group]
+            df_g_camp = df_camp[df_camp["media_group"] == group]
+
+            if df_g_pre.empty and df_g_camp.empty:
+                continue
+
+            pre_m = compute_funnel_metrics(
+                df_g_pre,
+                installs_col=installs_col,
+                kyc_col=kyc_unique_col,
+                esign_col=esign_unique_col,
+                trade_user_col=trade_any_unique_col,
+                trade_user_fallback_cols=trade_unique_fallback_cols,
+                days_in_period=pre_days,
+            )
+            camp_m = compute_funnel_metrics(
+                df_g_camp,
+                installs_col=installs_col,
+                kyc_col=kyc_unique_col,
+                esign_col=esign_unique_col,
+                trade_user_col=trade_any_unique_col,
+                trade_user_fallback_cols=trade_unique_fallback_cols,
+                days_in_period=campaign_days,
+            )
+
+            results.append({
+                "Media group": group,
+                "Pre Installs/day": pre_m["installs_per_day"],
+                "Campaign Installs/day": camp_m["installs_per_day"],
+                "Pre Install→KYC CR (%)": pre_m["cr_install_to_kyc"] * 100 if pd.notna(pre_m["cr_install_to_kyc"]) else np.nan,
+                "Campaign Install→KYC CR (%)": camp_m["cr_install_to_kyc"] * 100 if pd.notna(camp_m["cr_install_to_kyc"]) else np.nan,
+                "Lift (Install→KYC CR %)": compute_lift_relative(
+                    pre_m["cr_install_to_kyc"] * 100 if pd.notna(pre_m["cr_install_to_kyc"]) else np.nan,
+                    camp_m["cr_install_to_kyc"] * 100 if pd.notna(camp_m["cr_install_to_kyc"]) else np.nan
+                ),
+                "Pre KYC→Trade CR (%)": pre_m["cr_kyc_to_trade"] * 100 if pd.notna(pre_m["cr_kyc_to_trade"]) else np.nan,
+                "Campaign KYC→Trade CR (%)": camp_m["cr_kyc_to_trade"] * 100 if pd.notna(camp_m["cr_kyc_to_trade"]) else np.nan,
+                "Lift (KYC→Trade CR %)": compute_lift_relative(
+                    pre_m["cr_kyc_to_trade"] * 100 if pd.notna(pre_m["cr_kyc_to_trade"]) else np.nan,
+                    camp_m["cr_kyc_to_trade"] * 100 if pd.notna(camp_m["cr_kyc_to_trade"]) else np.nan
+                ),
+            })
+
+        if not results:
+            st.info("No Paid / Organic / Other groups with data in selected periods.")
+        else:
+            res_df = pd.DataFrame(results)
+            for col in res_df.columns:
+                if "CR (%)" in col or "Lift" in col:
+                    res_df[col] = res_df[col].map(format_pct)
+                if "Installs/day" in col:
+                    res_df[col] = res_df[col].map(lambda x: f"{x:.1f}" if pd.notna(x) else "NA")
+            st.dataframe(res_df, use_container_width=True)
+
+            st.markdown("""
+This table compares **Paid vs Organic vs Other** on:
+
+- Installs/day  
+- Install → KYC CR (and lift)  
+- KYC → Trade CR (and lift)  
+
+Use this to answer:  
+> “Did the campaign improve **lead quality** for Paid traffic?”
+""")
+
+
+# -------------------------------------------------
+# Tab 4: Media Source Leaderboard
+# -------------------------------------------------
+with tab_media:
+    st.header("Media Source Leaderboard (Campaign vs Pre)")
+
+    if media_col not in df.columns:
+        st.info("No 'Media Source (pid)' column — cannot compute leaderboard.")
+    else:
+        media_list = df[media_col].dropna().unique().tolist()
+        rows = []
+        for ms in media_list:
+            df_ms_pre = df_pre[df_pre[media_col] == ms]
+            df_ms_camp = df_camp[df_camp[media_col] == ms]
+
+            if df_ms_pre.empty and df_ms_camp.empty:
+                continue
+
+            pre_m = compute_funnel_metrics(
+                df_ms_pre,
+                installs_col=installs_col,
+                kyc_col=kyc_unique_col,
+                esign_col=esign_unique_col,
+                trade_user_col=trade_any_unique_col,
+                trade_user_fallback_cols=trade_unique_fallback_cols,
+                days_in_period=pre_days,
+            )
+            camp_m = compute_funnel_metrics(
+                df_ms_camp,
+                installs_col=installs_col,
+                kyc_col=kyc_unique_col,
+                esign_col=esign_unique_col,
+                trade_user_col=trade_any_unique_col,
+                trade_user_fallback_cols=trade_unique_fallback_cols,
+                days_in_period=campaign_days,
+            )
+
+            rows.append({
+                "Media Source": ms,
+                "Pre Installs/day": pre_m["installs_per_day"],
+                "Campaign Installs/day": camp_m["installs_per_day"],
+                "Pre Install→KYC CR (%)": pre_m["cr_install_to_kyc"] * 100 if pd.notna(pre_m["cr_install_to_kyc"]) else np.nan,
+                "Campaign Install→KYC CR (%)": camp_m["cr_install_to_kyc"] * 100 if pd.notna(camp_m["cr_install_to_kyc"]) else np.nan,
+                "Lift (Install→KYC CR %)": compute_lift_relative(
+                    pre_m["cr_install_to_kyc"] * 100 if pd.notna(pre_m["cr_install_to_kyc"]) else np.nan,
+                    camp_m["cr_install_to_kyc"] * 100 if pd.notna(camp_m["cr_install_to_kyc"]) else np.nan
+                ),
+                "Pre KYC→Trade CR (%)": pre_m["cr_kyc_to_trade"] * 100 if pd.notna(pre_m["cr_kyc_to_trade"]) else np.nan,
+                "Campaign KYC→Trade CR (%)": camp_m["cr_kyc_to_trade"] * 100 if pd.notna(camp_m["cr_kyc_to_trade"]) else np.nan,
+                "Lift (KYC→Trade CR %)": compute_lift_relative(
+                    pre_m["cr_kyc_to_trade"] * 100 if pd.notna(pre_m["cr_kyc_to_trade"]) else np.nan,
+                    camp_m["cr_kyc_to_trade"] * 100 if pd.notna(camp_m["cr_kyc_to_trade"]) else np.nan
+                ),
+            })
+
+        if not rows:
+            st.info("No media sources with data in selected periods.")
+        else:
+            ms_df = pd.DataFrame(rows)
+
+            # sort by Campaign Install→KYC CR descending
+            ms_df_sorted = ms_df.sort_values(by="Campaign Install→KYC CR (%)", ascending=False)
+
+            ms_df_display = ms_df_sorted.copy()
+            for col in ms_df_display.columns:
+                if "CR (%)" in col or "Lift" in col:
+                    ms_df_display[col] = ms_df_display[col].map(format_pct)
+                if "Installs/day" in col:
+                    ms_df_display[col] = ms_df_display[col].map(lambda x: f"{x:.1f}" if pd.notna(x) else "NA")
+
+            st.dataframe(ms_df_display, use_container_width=True)
+
+            st.markdown("""
+Use this leaderboard to see **which sources improved most** in:
+
+- Install→KYC conversion  
+- KYC→Trade conversion  
+
+You can highlight:
+> “Campaign drove better-quality users specifically from Source X and Y.”
+""")
+
+
+# -------------------------------------------------
+# Tab 5: Trade s2s Breakdown
+# -------------------------------------------------
+with tab_s2s:
+    st.header("Trade-related s2s Events Breakdown (Pre vs Campaign)")
+
+    if s2s_unique_cols:
+        s2s_pre = df_pre[s2s_unique_cols].sum().to_frame(name="Pre unique users")
+        s2s_camp = df_camp[s2s_unique_cols].sum().to_frame(name="Campaign unique users")
+        s2s_combined = s2s_pre.join(s2s_camp, how="outer").fillna(0)
+
+        st.dataframe(s2s_combined, use_container_width=True)
+
+        st.markdown("""
+This table shows **unique users** firing each trade-related **s2s event** in Pre vs Campaign.
+
+You can compute:
+- Any_trade_s2s uplift  
+- Equity / F&O / ETF / MTF trade user uplift  
+
+And link it back to **lead quality**:
+> “Campaign brought in users who were more likely to trade (higher trade_s2s penetration among new KYC).”
+""")
+    else:
+        st.info("No s2s trade-related unique user columns found in dataset.")
 
 st.markdown("---")
-st.markdown("App focuses on **funnel CR% and trade-related events (s2s)**. Revenue / INR fields are intentionally ignored.")
+st.markdown("**Note:** The app uses time-normalised comparisons (equal-length pre vs campaign, plus per-day metrics) to avoid misleading volume differences.")
