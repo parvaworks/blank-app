@@ -335,6 +335,19 @@ df_raw["Date"] = df_raw["Date"].astype(str)  # force text for safety
 df = parse_dates(df_raw.copy(), date_col="Date")
 df = derive_campaign_groups(df, col="Campaign (c)")
 
+# After df is created & campaign groups are derived, before tabs:
+group_by = st.sidebar.selectbox(
+    "Group funnel by",
+    ["None", "campaign_channel", "campaign_persona", "campaign_product"],
+    format_func=lambda x: {
+        "None": "No grouping",
+        "campaign_channel": "Campaign channel",
+        "campaign_persona": "Campaign persona",
+        "campaign_product": "Campaign product"
+    }[x]
+)
+
+
 # Detect key columns
 installs_col = "Installs"
 
@@ -941,6 +954,68 @@ Use this to build **any funnel you want** (e.g. Installs → Signup → KYC → 
 Use these **weekly tables** to:
 - See if funnel CRs jump systematically in campaign weeks.
 - Spot weeks where lead quality (KYC / Trade / Esign concentration) is unusually high or low.
+""")
+        # Optional: grouped funnel by campaign_channel / persona / product
+        if group_by != "None":
+            st.subheader(f"Grouped funnel lift by {group_by}")
+
+            groups = df[group_by].dropna().unique().tolist()
+            groups = [g for g in groups if g not in ("", "Organic/None")] + ["Organic/None" if "Organic/None" in groups else None]
+            groups = [g for g in groups if g is not None]
+
+            rows = []
+            for g in groups:
+                df_pre_g = df_pre[df_pre[group_by] == g]
+                df_camp_g = df_camp[df_camp[group_by] == g]
+
+                if df_pre_g.empty and df_camp_g.empty:
+                    continue
+
+                pre_totals_g = {step: df_pre_g[step].sum() if step in df_pre_g.columns else 0 for step in selected_steps}
+                camp_totals_g = {step: df_camp_g[step].sum() if step in df_camp_g.columns else 0 for step in selected_steps}
+
+                # base → last step conversion as a simple summary metric
+                base = selected_steps[0]
+                last = selected_steps[-1]
+                pre_base = pre_totals_g.get(base, 0)
+                pre_last = pre_totals_g.get(last, 0)
+                camp_base = camp_totals_g.get(base, 0)
+                camp_last = camp_totals_g.get(last, 0)
+
+                pre_cr = (pre_last / pre_base * 100) if pre_base > 0 else np.nan
+                camp_cr = (camp_last / camp_base * 100) if camp_base > 0 else np.nan
+                lift = compute_lift_relative(pre_cr, camp_cr)
+
+                rows.append({
+                    group_by: g,
+                    f"Pre {base}→{last} CR (%)": pre_cr,
+                    f"Camp {base}→{last} CR (%)": camp_cr,
+                    "Lift (%)": lift,
+                    "Pre base count": pre_base,
+                    "Camp base count": camp_base,
+                    "Pre last count": pre_last,
+                    "Camp last count": camp_last,
+                })
+
+            if not rows:
+                st.info(f"No data to show by {group_by}.")
+            else:
+                grp_df = pd.DataFrame(rows)
+                # Pretty formatting
+                for col in grp_df.columns:
+                    if "CR (%)" in col or "Lift (%)" in col:
+                        grp_df[col] = grp_df[col].map(format_pct)
+                st.dataframe(grp_df, use_container_width=True)
+
+                st.markdown(f"""
+Each row = one **{group_by}** bucket (e.g. channel / persona / product) with:
+
+- Base → Last-step CR (Pre vs Campaign)
+- % Lift
+- Base & last-step volumes
+
+This tells you, for example:
+> "Early Jobber IPO MB_Push cohorts had higher Install→Trade CR during campaign vs pre."
 """)
 
 st.markdown("---")
