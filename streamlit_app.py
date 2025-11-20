@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 # -------------------------------------------------
 st.set_page_config(page_title="HDFC Sky – Funnel Lift & Lead Quality", layout="wide")
 
-st.title("HDFC Sky — App Funnel Lift & Lead Quality Analyzer (v2, fixed)")
+st.title("HDFC Sky — App Funnel Lift & Lead Quality Analyzer (v3)")
 st.markdown("""
 This app analyses **app funnel performance** (Installs → KYC → Trade → Esign) and computes:
 
@@ -17,7 +17,8 @@ This app analyses **app funnel performance** (Installs → KYC → Trade → Esi
   - KYC → Trade  
   - Install → Esign  
 - **Time-normalised** comparisons (equal-length pre vs campaign, per-day metrics).
-- **Daily CR trends**, **Paid vs Organic**, **media source leaderboard**, and **trade-related s2s event breakdown**.
+- **Daily CR trends**, **Paid vs Organic**, **media source leaderboard**, **trade-related s2s breakdown**, and a
+- **Custom Funnel Builder** where you can define your own steps and see lift (including weekly tables).
 
 **Revenue / INR fields are intentionally ignored.**
 """)
@@ -121,6 +122,90 @@ def format_pct(x):
     return f"{x:.2f}%" if pd.notna(x) else "NA"
 
 
+def weekly_aggregate(df, step_cols):
+    """Aggregate to weekly (Monday-start) for selected step columns."""
+    if df.empty:
+        return pd.DataFrame()
+    df = df.copy()
+    df["WeekStart"] = df["Date"] - pd.to_timedelta(df["Date"].dt.weekday, unit="d")
+    agg = df.groupby("WeekStart")[step_cols].sum().reset_index()
+    return agg
+
+
+def build_pairwise_lift_table(steps, pre_totals, camp_totals):
+    """
+    Build table: each row = step_i → step_{i+1}, with Pre CR, Campaign CR, Lift.
+    pre_totals & camp_totals are dicts {step: total_value}.
+    """
+    rows = []
+    for i in range(len(steps) - 1):
+        a = steps[i]
+        b = steps[i + 1]
+        pre_a = pre_totals.get(a, 0)
+        pre_b = pre_totals.get(b, 0)
+        camp_a = camp_totals.get(a, 0)
+        camp_b = camp_totals.get(b, 0)
+
+        pre_cr = (pre_b / pre_a * 100) if pre_a > 0 else np.nan
+        camp_cr = (camp_b / camp_a * 100) if camp_a > 0 else np.nan
+        lift = compute_lift_relative(pre_cr, camp_cr)
+
+        rows.append({
+            "Step": f"{a} → {b}",
+            "Pre CR (%)": pre_cr,
+            "Campaign CR (%)": camp_cr,
+            "Lift (%)": lift
+        })
+    return pd.DataFrame(rows)
+
+
+def build_base_to_step_lift_table(steps, pre_totals, camp_totals):
+    """
+    Build table: each row = base_step → step_k, with Pre CR, Campaign CR, Lift.
+    Base step = steps[0].
+    """
+    if not steps:
+        return pd.DataFrame()
+    base = steps[0]
+    rows = []
+    pre_base = pre_totals.get(base, 0)
+    camp_base = camp_totals.get(base, 0)
+
+    for step in steps[1:]:
+        pre_step = pre_totals.get(step, 0)
+        camp_step = camp_totals.get(step, 0)
+
+        pre_cr = (pre_step / pre_base * 100) if pre_base > 0 else np.nan
+        camp_cr = (camp_step / camp_base * 100) if camp_base > 0 else np.nan
+        lift = compute_lift_relative(pre_cr, camp_cr)
+
+        rows.append({
+            "Base → Step": f"{base} → {step}",
+            "Pre CR (%)": pre_cr,
+            "Campaign CR (%)": camp_cr,
+            "Lift (%)": lift
+        })
+    return pd.DataFrame(rows)
+
+
+def add_cr_columns_weekly(df_week, steps):
+    """
+    Given a weekly aggregated DataFrame with step count columns,
+    add CR columns for consecutive steps.
+    """
+    df_week = df_week.copy()
+    for i in range(len(steps) - 1):
+        a = steps[i]
+        b = steps[i + 1]
+        cr_col = f"CR {a} → {b} (%)"
+        if a in df_week.columns and b in df_week.columns:
+            denom = df_week[a].replace(0, np.nan)
+            df_week[cr_col] = (df_week[b] / denom) * 100
+        else:
+            df_week[cr_col] = np.nan
+    return df_week
+
+
 # -------------------------------------------------
 # Sidebar: Data input
 # -------------------------------------------------
@@ -138,7 +223,7 @@ if uploaded_file is not None:
 else:
     try:
         df_raw = pd.read_csv(default_path)
-        st.sidebar.success(f"Loaded default file from: /mnt/data/HDFC_SKY_Android_Organic_Paid_13_11_25.csv")
+        st.sidebar.success(f"Loaded default file from: {default_path}")
     except Exception:
         st.sidebar.error("Could not load default file. Please upload a CSV.")
         st.stop()
@@ -203,9 +288,7 @@ for col in numeric_cols_to_clean:
 
 # -------------------------------------------------
 # Media source detection & media_group classification
-# (do this BEFORE creating df_pre / df_camp)
 # -------------------------------------------------
-# Try to find "Media Source (pid)" flexibly
 media_col = None
 for c in df.columns:
     cl = c.lower()
@@ -228,14 +311,14 @@ if media_col is not None:
         return "Other"
     df["media_group"] = df[media_col].apply(classify_media)
 else:
-    st.sidebar.info("No media source column found — Paid vs Organic views will be disabled.")
+    st.sidebar.info("No media source column found — Paid vs Organic views will be limited.")
 
 # -------------------------------------------------
 # Sidebar: Filters & Campaign window with time normalisation
 # -------------------------------------------------
 st.sidebar.header("Filters & Campaign Window")
 
-# Optional filter by media source value itself
+# Optional filter by raw media source value
 if media_col is not None:
     media_options = ["All"] + sorted(df[media_col].dropna().unique().tolist())
     media_choice = st.sidebar.selectbox("Filter by Media Source (raw)", options=media_options, index=0)
@@ -250,7 +333,7 @@ max_date = df["Date"].max()
 st.sidebar.markdown(f"**Data date range:** {min_date.date()} → {max_date.date()}")
 
 default_campaign_end = max_date.date()
-default_campaign_start = (max_date - pd.Timedelta(days=30)).date()
+default_campaign_start = (max_date - pd.Timedelta(days=49)).date()  # default 49 days to match your example
 if default_campaign_start < min_date.date():
     default_campaign_start = min_date.date()
 
@@ -345,12 +428,12 @@ camp_metrics = compute_funnel_metrics(
 # -------------------------------------------------
 # Tabs for insights
 # -------------------------------------------------
-tab_summary, tab_trends, tab_paid_org, tab_media, tab_s2s = st.tabs(
-    ["Summary & Lifts", "CR Trends", "Paid vs Organic", "Media Source Leaderboard", "Trade s2s Breakdown"]
+tab_summary, tab_trends, tab_paid_org, tab_media, tab_s2s, tab_custom = st.tabs(
+    ["Summary & Lifts", "CR Trends", "Paid vs Organic", "Media Source Leaderboard", "Trade s2s Breakdown", "Custom Funnel & Weekly Lifts"]
 )
 
 # -------------------------------------------------
-# Tab 1: Summary & Lifts
+# Tab 1: Summary & Lifts (period-level)
 # -------------------------------------------------
 with tab_summary:
     st.header("Funnel Summary — Pre vs Campaign (Time-normalised)")
@@ -382,7 +465,7 @@ with tab_summary:
         st.metric("Trade/day (Pre)", f"{pre_metrics['trade_per_day']:.1f}")
         st.metric("Trade/day (Campaign)", f"{camp_metrics['trade_per_day']:.1f}")
 
-    st.subheader("Conversion Rates by Step & % Lift")
+    st.subheader("Default Conversion Rates by Step & % Lift")
 
     conv_rows = [
         {
@@ -646,6 +729,118 @@ And link it back to **lead quality**:
 """)
     else:
         st.info("No s2s trade-related unique user columns found in dataset.")
+
+
+# -------------------------------------------------
+# Tab 6: Custom Funnel & Weekly Lifts
+# -------------------------------------------------
+with tab_custom:
+    st.header("Custom Funnel Builder & Weekly Lift Tables")
+
+    st.markdown("""
+Use this to build **any funnel you want** (e.g. Installs → Signup → KYC → Any trade → Esign) and see:
+
+- Period-level **conversion & lift** for each step.
+- **Base → step** conversion (e.g. Install → KYC, Install → Esign).
+- **Weekly tables** of counts and CRs for Pre and Campaign.
+""")
+
+    # Candidate step columns: Installs + any "unique users" columns
+    user_cols = [c for c in df.columns if "unique users" in c.lower()]
+    step_options = []
+
+    if installs_col in df.columns:
+        step_options.append(installs_col)
+
+    # Try to order: KYC, trade, esign first, then others
+    special_order = []
+    if kyc_unique_col and kyc_unique_col in user_cols:
+        special_order.append(kyc_unique_col)
+    if trade_any_unique_col and trade_any_unique_col in user_cols:
+        special_order.append(trade_any_unique_col)
+    if esign_unique_col and esign_unique_col in user_cols:
+        special_order.append(esign_unique_col)
+
+    remaining = [c for c in user_cols if c not in special_order]
+    step_options.extend(special_order + remaining)
+
+    step_options = list(dict.fromkeys(step_options))  # de-dup
+
+    default_steps = []
+    if installs_col in step_options:
+        default_steps.append(installs_col)
+    if kyc_unique_col and kyc_unique_col in step_options:
+        default_steps.append(kyc_unique_col)
+    if trade_any_unique_col and trade_any_unique_col in step_options:
+        default_steps.append(trade_any_unique_col)
+    if esign_unique_col and esign_unique_col in step_options:
+        default_steps.append(esign_unique_col)
+
+    selected_steps = st.multiselect(
+        "Select funnel steps (in order). First step is the base (denominator).",
+        options=step_options,
+        default=default_steps if default_steps else step_options[:3],
+        help="These should be user-count style columns (e.g. Installs, verify_kyc (Unique users), any_trade_s2s (Unique users), esign (Unique users), ...)."
+    )
+
+    if len(selected_steps) < 2:
+        st.info("Select at least two steps to compute funnel conversions and lifts.")
+    else:
+        # Period-level totals for selected steps
+        pre_totals = {step: df_pre[step].sum() if step in df_pre.columns else 0 for step in selected_steps}
+        camp_totals = {step: df_camp[step].sum() if step in df_camp.columns else 0 for step in selected_steps}
+
+        st.subheader("Period-level: Pairwise Step Conversion & Lift")
+        pair_df = build_pairwise_lift_table(selected_steps, pre_totals, camp_totals)
+        pair_display = pair_df.copy()
+        for col in ["Pre CR (%)", "Campaign CR (%)", "Lift (%)"]:
+            pair_display[col] = pair_display[col].map(format_pct)
+        st.dataframe(pair_display, use_container_width=True)
+
+        st.subheader("Period-level: Base → Step Conversion & Lift")
+        base_df = build_base_to_step_lift_table(selected_steps, pre_totals, camp_totals)
+        base_display = base_df.copy()
+        for col in ["Pre CR (%)", "Campaign CR (%)", "Lift (%)"]:
+            base_display[col] = base_display[col].map(format_pct)
+        st.dataframe(base_display, use_container_width=True)
+
+        st.markdown("""
+**Interpretation:**
+- **Pairwise table** – each row is *step i → step i+1* (local funnel CR).
+- **Base → Step table** – each row is *base step → later step* (cumulative CR from first step).
+- Lift shows how the funnel efficiency changed from pre → campaign.
+""")
+
+        st.subheader("Weekly tables for selected funnel steps")
+
+        # Weekly aggregation for pre & campaign
+        pre_week = weekly_aggregate(df_pre, selected_steps)
+        camp_week = weekly_aggregate(df_camp, selected_steps)
+
+        pre_week = add_cr_columns_weekly(pre_week, selected_steps)
+        camp_week = add_cr_columns_weekly(camp_week, selected_steps)
+
+        col_w1, col_w2 = st.columns(2)
+
+        with col_w1:
+            st.markdown("**Pre period – weekly funnel**")
+            if pre_week.empty:
+                st.info("No pre-period data to show weekly table.")
+            else:
+                st.dataframe(pre_week, use_container_width=True)
+
+        with col_w2:
+            st.markdown("**Campaign period – weekly funnel**")
+            if camp_week.empty:
+                st.info("No campaign-period data to show weekly table.")
+            else:
+                st.dataframe(camp_week, use_container_width=True)
+
+        st.markdown("""
+Use these **weekly tables** to:
+- See if funnel CRs jump systematically in campaign weeks.
+- Spot weeks where lead quality (KYC / Trade / Esign concentration) is unusually high or low.
+""")
 
 st.markdown("---")
 st.markdown("**Note:** The app uses time-normalised comparisons (equal-length pre vs campaign, plus per-day metrics) to avoid misleading volume differences.")
