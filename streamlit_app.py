@@ -63,6 +63,106 @@ def safe_to_numeric(series):
         errors="coerce"
     )
 
+def derive_campaign_groups(df, col="Campaign (c)"):
+    name_series = df[col].fillna("").astype(str)
+
+    def campaign_channel(name: str) -> str:
+        u = name.upper()
+        u_stripped = u.strip()
+
+        if u_stripped in ("", "NONE"):
+            return "Organic/None"
+
+        if u.startswith("MB_"):
+            if "_PUSH_" in u:
+                return "MB Push"
+            if "_APPBOX_" in u:
+                return "MB Appbox"
+            if "_ALERTBOX_" in u:
+                return "MB Alertbox"
+            return "MB Other"
+
+        if u.startswith("NB_"):
+            if "_BB_" in u:
+                return "NB Banner/BB"
+            if "_CP_" in u:
+                return "NB Campaign Page"
+            return "NB Other"
+
+        if u.startswith("SMS_"):
+            return "SMS"
+
+        if u.startswith("EMAIL_"):
+            return "Email"
+
+        if u.startswith("RCS_"):
+            return "RCS"
+
+        if u.startswith("WEBSITE_") or "LANDING_PAGE" in u or "WEBPUSH" in u:
+            return "Website / Webpush"
+
+        if u.startswith("UAC_"):
+            return "UAC (App Campaign)"
+
+        if "WHATSAPP" in u:
+            return "WhatsApp"
+
+        if "OTT" in u or "JIOCINEMA" in u:
+            return "OTT"
+
+        if "TRADINGVIEW" in u:
+            return "TradingView"
+
+        if "OLAIPO" in u:
+            return "OLAIPO"
+
+        if "QR" in u:
+            return "QR / Offline"
+
+        if "GRAFFITI" in u or "PILLER" in u:
+            return "OOH / Branch"
+
+        if "HDFC SKY" in u or u_stripped in ("HSLSKY", "HDFCSKY", "ADS_SKY", "ADS SKY"):
+            return "Sky Brand / Generic"
+
+        # default catch-all
+        return "Other"
+
+    personas = [
+        "EARLY_JOBBER", "MIDLEVEL", "SAL", "SEASONED", "SELF",
+        "WOMAN", "TRADING_OUTSIDE", "REST", "LOANTAKER",
+        "SENIOR_CITIZEN", "SENIOR"
+    ]
+
+    def campaign_persona(name: str) -> str:
+        u = name.upper()
+        for p in personas:
+            if p in u:
+                return p.title().replace("_", " ")
+        return "Generic / None"
+
+    def campaign_product(name: str) -> str:
+        u = name.upper()
+        if "IPO" in u:
+            return "IPO"
+        if "ETF" in u:
+            return "ETF"
+        if "FNO" in u or "FN0" in u:
+            return "F&O"
+        if "DEMAT" in u:
+            return "Demat"
+        if "MTF" in u:
+            return "MTF"
+        if "MF" in u and "EMAIL" in u:
+            return "Mutual Funds"
+        return "Generic / Not product-specific"
+
+    df = df.copy()
+    df["campaign_channel"] = name_series.apply(campaign_channel)
+    df["campaign_persona"] = name_series.apply(campaign_persona)
+    df["campaign_product"] = name_series.apply(campaign_product)
+    return df
+
 
 def compute_funnel_metrics(df, installs_col, kyc_col, esign_col,
                            trade_user_col, trade_user_fallback_cols,
@@ -233,6 +333,7 @@ else:
 # -------------------------------------------------
 df_raw["Date"] = df_raw["Date"].astype(str)  # force text for safety
 df = parse_dates(df_raw.copy(), date_col="Date")
+df = derive_campaign_groups(df, col="Campaign (c)")
 
 # Detect key columns
 installs_col = "Installs"
