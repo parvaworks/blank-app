@@ -26,13 +26,35 @@ This app analyses **app funnel performance** (Installs → KYC → Trade → Esi
 # Helper functions
 # -------------------------------------------------
 def parse_dates(df, date_col="Date"):
-    """Parse Date column robustly and sort."""
+    """
+    Robust date parser for your case:
+    - Some values are stored as actual datetimes, some as text.
+    - All are logically month/day/year (m/d/yyyy, mm/dd/yyyy, etc.).
+    
+    Strategy:
+    1. Convert EVERYTHING to string (ignoring existing dtype).
+    2. Strip spaces.
+    3. Parse with dayfirst=False (US-style month-first).
+    4. Fallback to a second generic parse for any weird edge cases.
+    """
     if date_col not in df.columns:
         raise ValueError(f"Date column '{date_col}' not found in data.")
-    df[date_col] = pd.to_datetime(df[date_col], dayfirst=True, errors="coerce")
+
+    # 1) Force everything to text first (kills the “some as date, some as text” problem)
+    s = df[date_col].astype(str).str.strip()
+
+    # 2) Main parse: treat as month/day/year
+    dt = pd.to_datetime(s, dayfirst=False, errors="coerce")
+
+    # 3) Fallback for any odd strings that failed above
+    dt_fallback = pd.to_datetime(s, errors="coerce")
+    dt = dt.where(~dt.isna(), dt_fallback)
+
+    df[date_col] = dt
     df = df.dropna(subset=[date_col])
     df = df.sort_values(date_col).reset_index(drop=True)
     return df
+
 
 def safe_to_numeric(series):
     """Coerce a Series to numeric, stripping commas, spaces, % and ₹."""
