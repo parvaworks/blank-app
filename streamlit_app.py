@@ -784,6 +784,104 @@ This chart mirrors a **lift-style view**:
 - Label = overall % lift in weekly Install → Verify Phone CR  
 """)
 
+    # Weekly Install → KYC CR with lift annotation
+    st.subheader("Weekly Install → KYC CR (Pre vs Campaign)")
+
+    if kyc_unique_col is None:
+        st.info("No 'verify_kyc (Unique users)' column detected. Cannot plot weekly Install → KYC CR.")
+    else:
+        weekly_cols_kyc = [installs_col, kyc_unique_col]
+
+        pre_week_kyc = weekly_aggregate(df_pre, weekly_cols_kyc)
+        camp_week_kyc = weekly_aggregate(df_camp, weekly_cols_kyc)
+
+        # compute CR (%) = verify_kyc / installs * 100
+        for df_w, label in [(pre_week_kyc, "Pre"), (camp_week_kyc, "Campaign")]:
+            if not df_w.empty:
+                denom = df_w[installs_col].replace(0, np.nan)
+                df_w["CR (%)"] = (df_w[kyc_unique_col] / denom) * 100
+                df_w["period"] = label
+
+        if pre_week_kyc.empty and camp_week_kyc.empty:
+            st.info("No weekly data available for Install → KYC CR in the selected periods.")
+        else:
+            fig_kyc, ax_kyc = plt.subplots(figsize=(10, 4))
+
+            # Plot pre and campaign lines
+            if not pre_week_kyc.empty:
+                ax_kyc.plot(
+                    pre_week_kyc["WeekStart"],
+                    pre_week_kyc["CR (%)"],
+                    marker="o",
+                    color="grey",
+                    label="Pre-Campaign (weekly CR)",
+                    linewidth=1.5,
+                )
+
+            if not camp_week_kyc.empty:
+                ax_kyc.plot(
+                    camp_week_kyc["WeekStart"],
+                    camp_week_kyc["CR (%)"],
+                    marker="o",
+                    color="tab:blue",
+                    label="Campaign (weekly CR)",
+                    linewidth=1.8,
+                )
+
+            # Averages & lift
+            pre_avg_kyc = pre_week_kyc["CR (%)"].mean() if not pre_week_kyc.empty else np.nan
+            camp_avg_kyc = camp_week_kyc["CR (%)"].mean() if not camp_week_kyc.empty else np.nan
+
+            if pd.notna(pre_avg_kyc):
+                ax_kyc.axhline(pre_avg_kyc, color="grey", linestyle="--", linewidth=1,
+                               label=f"Pre Avg: {pre_avg_kyc:.1f}%")
+            if pd.notna(camp_avg_kyc):
+                ax_kyc.axhline(camp_avg_kyc, color="tab:blue", linestyle="--", linewidth=1,
+                               label=f"Campaign Avg: {camp_avg_kyc:.1f}%")
+
+            lift_pct_kyc = compute_lift_relative(pre_avg_kyc, camp_avg_kyc) \
+                           if pd.notna(pre_avg_kyc) and pd.notna(camp_avg_kyc) else np.nan
+
+            # Campaign shading
+            if not camp_week_kyc.empty:
+                shade_start = camp_week_kyc["WeekStart"].min()
+                shade_end = camp_week_kyc["WeekStart"].max() + pd.Timedelta(days=7)
+                ax_kyc.axvspan(shade_start, shade_end, color="#ffe6cc", alpha=0.4, zorder=0)
+
+                # Annotation in middle of campaign window
+                mid_ord = (shade_start.toordinal() + shade_end.toordinal()) / 2
+                mid_date = datetime.fromordinal(int(mid_ord))
+
+                if pd.notna(lift_pct_kyc):
+                    ax_kyc.annotate(
+                        f"Campaign Lift: {lift_pct_kyc:+.1f}%",
+                        xy=(mid_date, camp_avg_kyc),
+                        xytext=(mid_date, camp_avg_kyc * 1.05 if camp_avg_kyc > 0 else camp_avg_kyc + 2),
+                        ha="center",
+                        bbox=dict(boxstyle="round,pad=0.4", edgecolor="green", facecolor="white"),
+                        color="green",
+                        fontsize=9,
+                    )
+
+            ax_kyc.set_title("Weekly Install → KYC Conversion Rate", fontsize=12, fontweight="bold")
+            ax_kyc.set_ylabel("CR (%)")
+            ax_kyc.set_xlabel("Week Start")
+            ax_kyc.grid(True, alpha=0.3)
+            ax_kyc.legend(loc="upper left", fontsize=8)
+
+            fig_kyc.autofmt_xdate()
+            st.pyplot(fig_kyc)
+
+            st.markdown("""
+This chart shows **weekly Install → KYC CR (%)** with a clear lift read:
+
+- Grey = Pre-campaign weekly CR  
+- Blue = Campaign weekly CR  
+- Dashed lines = average CR in each period  
+- Shaded region = campaign window  
+- Label = overall % lift in weekly Install → KYC CR  
+""")
+
 
 # -------------------------------------------------
 # Tab 3: Paid vs Organic
