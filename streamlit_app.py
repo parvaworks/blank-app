@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
 
 # -------------------------------------------------
 # Page config
@@ -688,11 +689,11 @@ The chart shows **daily CRs**:
 You can visually check if **campaign period** ({campaign_start_dt.date()} → {campaign_end_dt.date()}) lines up with higher CRs.
 """)
 
-    # NEW: Weekly Install → Verify Phone CR
-    st.subheader("Weekly Install → Verify Phone CR")
+       # Weekly Install → Verify Phone CR with lift annotation
+    st.subheader("Weekly Install → Verify Phone CR (Pre vs Campaign)")
 
     if phone_verify_col is None:
-        st.info("No 'verify phone (Unique users)' column detected. Cannot plot weekly Install → Verify Phone CR.")
+        st.info("No 'confirm_mobileotp' / phone-verify column detected. Cannot plot weekly Install → Verify Phone CR.")
     else:
         weekly_cols = [installs_col, phone_verify_col]
 
@@ -706,21 +707,81 @@ You can visually check if **campaign period** ({campaign_start_dt.date()} → {c
                 df_w["CR (%)"] = (df_w[phone_verify_col] / denom) * 100
                 df_w["period"] = label
 
-        combined_week = pd.concat(
-            [pre_week_pv, camp_week_pv],
-            ignore_index=True
-        ) if not pre_week_pv.empty or not camp_week_pv.empty else pd.DataFrame()
-
-        if combined_week.empty:
+        if pre_week_pv.empty and camp_week_pv.empty:
             st.info("No weekly data available for Install → Verify Phone CR in the selected periods.")
         else:
-            plot_df = combined_week.pivot(index="WeekStart", columns="period", values="CR (%)")
-            st.line_chart(plot_df, height=350)
-            st.markdown("""
-This chart shows **weekly Install → Verify Phone CR (%)** for Pre vs Campaign.
+            fig, ax = plt.subplots(figsize=(10, 4))
 
-Use it to see:
-- Whether your acquisition during the campaign is bringing users who complete phone verification at a higher rate.
+            # Plot pre and campaign lines
+            if not pre_week_pv.empty:
+                ax.plot(
+                    pre_week_pv["WeekStart"],
+                    pre_week_pv["CR (%)"],
+                    marker="o",
+                    color="grey",
+                    label="Pre-Campaign (weekly CR)",
+                    linewidth=1.5,
+                )
+
+            if not camp_week_pv.empty:
+                ax.plot(
+                    camp_week_pv["WeekStart"],
+                    camp_week_pv["CR (%)"],
+                    marker="o",
+                    color="tab:blue",
+                    label="Campaign (weekly CR)",
+                    linewidth=1.8,
+                )
+
+            # Averages & lift
+            pre_avg = pre_week_pv["CR (%)"].mean() if not pre_week_pv.empty else np.nan
+            camp_avg = camp_week_pv["CR (%)"].mean() if not camp_week_pv.empty else np.nan
+
+            if pd.notna(pre_avg):
+                ax.axhline(pre_avg, color="grey", linestyle="--", linewidth=1, label=f"Pre Avg: {pre_avg:.1f}%")
+            if pd.notna(camp_avg):
+                ax.axhline(camp_avg, color="tab:blue", linestyle="--", linewidth=1, label=f"Campaign Avg: {camp_avg:.1f}%")
+
+            lift_pct = compute_lift_relative(pre_avg, camp_avg) if pd.notna(pre_avg) and pd.notna(camp_avg) else np.nan
+
+            # Campaign shading
+            if not camp_week_pv.empty:
+                shade_start = camp_week_pv["WeekStart"].min()
+                shade_end = camp_week_pv["WeekStart"].max() + pd.Timedelta(days=7)
+                ax.axvspan(shade_start, shade_end, color="#ffe6cc", alpha=0.4, zorder=0)
+
+                # Annotation in middle of campaign window
+                mid_ord = (shade_start.toordinal() + shade_end.toordinal()) / 2
+                mid_date = datetime.fromordinal(int(mid_ord))
+
+                if pd.notna(lift_pct):
+                    ax.annotate(
+                        f"Campaign Lift: {lift_pct:+.1f}%",
+                        xy=(mid_date, camp_avg),
+                        xytext=(mid_date, camp_avg * 1.05 if camp_avg > 0 else camp_avg + 2),
+                        ha="center",
+                        bbox=dict(boxstyle="round,pad=0.4", edgecolor="green", facecolor="white"),
+                        color="green",
+                        fontsize=9,
+                    )
+
+            ax.set_title("Weekly Install → Verify Phone Conversion Rate", fontsize=12, fontweight="bold")
+            ax.set_ylabel("CR (%)")
+            ax.set_xlabel("Week Start")
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc="upper left", fontsize=8)
+
+            fig.autofmt_xdate()
+            st.pyplot(fig)
+
+            st.markdown("""
+This chart mirrors a **lift-style view**:
+
+- Grey = Pre-campaign weekly CR  
+- Blue = Campaign weekly CR  
+- Dashed lines = average CR in each period  
+- Shaded region = campaign window  
+- Label = overall % lift in weekly Install → Verify Phone CR  
 """)
 
 
