@@ -6,9 +6,38 @@ from datetime import datetime, timedelta
 # -------------------------------------------------
 # Page config
 # -------------------------------------------------
-st.set_page_config(page_title="HDFC Sky – Funnel Lift & Lead Quality", layout="wide")
+# Add logo (top-left)
+logo_path = "/mnt/data/hdfc_sky_logo.png"  # replace with your actual file name
 
-st.title("HDFC Sky — App Funnel Lift & Lead Quality Analyzer (v3)")
+st.markdown(
+    """
+    <style>
+        .logo-container {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .logo-img {
+            height: 48px;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    f"""
+    <div class="logo-container">
+        <img src="{logo_path}" class="logo-img">
+        <h1>HDFC Sky — App Funnel Lift & Lead Quality Analyzer (v3)</h1>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Remove the original title line
+# st.title("HDFC Sky — App Funnel Lift & Lead Quality Analyzer (v3)")
+
 st.markdown("""
 This app analyses **app funnel performance** (Installs → KYC → Trade → Esign) and computes:
 
