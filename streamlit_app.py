@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 # Page config
 # -------------------------------------------------
 # Add logo (top-left)
-logo_path = "blank-app/move.png"  # replace with your actual file name
+logo_path = "https://github.com/parvaworks/blank-app/blob/a595e52c8e1b44c78b2262dd566ada776a8eab83/move.png"  # replace with your actual file name
 
 st.markdown(
     """
