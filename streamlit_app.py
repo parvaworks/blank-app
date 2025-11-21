@@ -7,36 +7,21 @@ from datetime import datetime, timedelta
 # Page config
 # -------------------------------------------------
 # Add logo (top-left)
-logo_path = "https://github.com/parvaworks/blank-app/blob/a595e52c8e1b44c78b2262dd566ada776a8eab83/move.png"  # replace with your actual file name
+st.set_page_config(page_title="HDFC Sky – Funnel Lift & Lead Quality", layout="wide")
 
-st.markdown(
-    """
-    <style>
-        .logo-container {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-        .logo-img {
-            height: 48px;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# ---- Logo + Title header ----
+logo_path = "move.png"  # <-- put your actual logo file name here
 
-st.markdown(
-    f"""
-    <div class="logo-container">
-        <img src="{logo_path}" class="logo-img">
-        <h1>HDFC Sky — App Funnel Lift & Lead Quality Analyzer (v3)</h1>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+header_col1, header_col2 = st.columns([1, 6])
 
-# Remove the original title line
-# st.title("HDFC Sky — App Funnel Lift & Lead Quality Analyzer (v3)")
+with header_col1:
+    try:
+        st.image(logo_path, use_column_width=True)
+    except Exception:
+        st.write("")  # fail silently if logo not found
+
+with header_col2:
+    st.markdown("## HDFC Sky — App Funnel Lift & Lead Quality Analyzer (v3)")
 
 st.markdown("""
 This app analyses **app funnel performance** (Installs → KYC → Trade → Esign) and computes:
