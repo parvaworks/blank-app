@@ -353,13 +353,15 @@ esign_candidates = [c for c in df.columns if "esign" in c.lower() and "unique us
 if esign_candidates:
     esign_unique_col = esign_candidates[0]
 
-# detect verify phone unique users
+# detect confirm_mobileotp (Install → Phone verify) unique users
 phone_candidates = [
     c for c in df.columns
-    if "verify" in c.lower() and "phone" in c.lower() and "unique users" in c.lower()
+    if "confirm_mobileotp" in c.lower()
 ]
 if phone_candidates:
     phone_verify_col = phone_candidates[0]
+else:
+    phone_verify_col = None
 
 s2s_unique_cols = [c for c in df.columns if "s2s" in c.lower() and "unique users" in c.lower()]
 
