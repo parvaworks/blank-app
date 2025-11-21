@@ -63,6 +63,7 @@ def safe_to_numeric(series):
         errors="coerce"
     )
 
+
 def derive_campaign_groups(df, col="Campaign (c)"):
     name_series = df[col].fillna("").astype(str)
 
@@ -335,19 +336,6 @@ df_raw["Date"] = df_raw["Date"].astype(str)  # force text for safety
 df = parse_dates(df_raw.copy(), date_col="Date")
 df = derive_campaign_groups(df, col="Campaign (c)")
 
-# After df is created & campaign groups are derived, before tabs:
-group_by = st.sidebar.selectbox(
-    "Group funnel by",
-    ["None", "campaign_channel", "campaign_persona", "campaign_product"],
-    format_func=lambda x: {
-        "None": "No grouping",
-        "campaign_channel": "Campaign channel",
-        "campaign_persona": "Campaign persona",
-        "campaign_product": "Campaign product"
-    }[x]
-)
-
-
 # Detect key columns
 installs_col = "Installs"
 
@@ -355,6 +343,7 @@ kyc_unique_col = None
 esign_unique_col = None
 trade_any_unique_col = None
 trade_unique_fallback_cols = []
+phone_verify_col = None  # NEW
 
 kyc_candidates = [c for c in df.columns if "verify_kyc" in c.lower() and "unique users" in c.lower()]
 if kyc_candidates:
@@ -363,6 +352,14 @@ if kyc_candidates:
 esign_candidates = [c for c in df.columns if "esign" in c.lower() and "unique users" in c.lower()]
 if esign_candidates:
     esign_unique_col = esign_candidates[0]
+
+# detect verify phone unique users
+phone_candidates = [
+    c for c in df.columns
+    if "verify" in c.lower() and "phone" in c.lower() and "unique users" in c.lower()
+]
+if phone_candidates:
+    phone_verify_col = phone_candidates[0]
 
 s2s_unique_cols = [c for c in df.columns if "s2s" in c.lower() and "unique users" in c.lower()]
 
@@ -385,6 +382,8 @@ if kyc_unique_col is None:
     st.warning("Could not find a 'verify_kyc (Unique users)' style column. KYC metrics will be NaN.")
 if esign_unique_col is None:
     st.warning("Could not find an 'esign (Unique users)' style column. Esign metrics will be NaN.")
+if phone_verify_col is None:
+    st.warning("Could not find a 'verify phone (Unique users)' style column. Weekly Install→Verify Phone CR plot will be disabled.")
 if trade_any_unique_col is None and not trade_unique_fallback_cols:
     st.warning("Could not find any trade-related s2s (Unique users) columns. Trade metrics will be NaN.")
 
@@ -392,6 +391,7 @@ if trade_any_unique_col is None and not trade_unique_fallback_cols:
 numeric_cols_to_clean = [installs_col]
 if kyc_unique_col: numeric_cols_to_clean.append(kyc_unique_col)
 if esign_unique_col: numeric_cols_to_clean.append(esign_unique_col)
+if phone_verify_col: numeric_cols_to_clean.append(phone_verify_col)
 if trade_any_unique_col: numeric_cols_to_clean.append(trade_any_unique_col)
 numeric_cols_to_clean.extend(trade_unique_fallback_cols)
 numeric_cols_to_clean = list(dict.fromkeys(numeric_cols_to_clean))  # de-dup
@@ -472,6 +472,20 @@ campaign_start_dt = pd.to_datetime(campaign_start)
 campaign_end_dt = pd.to_datetime(campaign_end)
 
 equal_length_pre = st.sidebar.checkbox("Use equal-length pre period", value=True)
+
+# -------------------------------------------------
+# Optional: group-by mode for custom funnel later
+# -------------------------------------------------
+group_by = st.sidebar.selectbox(
+    "Group funnel by",
+    ["None", "campaign_channel", "campaign_persona", "campaign_product"],
+    format_func=lambda x: {
+        "None": "No grouping",
+        "campaign_channel": "Campaign channel",
+        "campaign_persona": "Campaign persona",
+        "campaign_product": "Campaign product"
+    }[x]
+)
 
 # Define campaign mask & slice
 camp_mask = (df["Date"] >= campaign_start_dt) & (df["Date"] <= campaign_end_dt)
@@ -656,6 +670,41 @@ The chart shows **daily CRs**:
 - Install → Esign  
 
 You can visually check if **campaign period** ({campaign_start_dt.date()} → {campaign_end_dt.date()}) lines up with higher CRs.
+""")
+
+    # NEW: Weekly Install → Verify Phone CR
+    st.subheader("Weekly Install → Verify Phone CR")
+
+    if phone_verify_col is None:
+        st.info("No 'verify phone (Unique users)' column detected. Cannot plot weekly Install → Verify Phone CR.")
+    else:
+        weekly_cols = [installs_col, phone_verify_col]
+
+        pre_week_pv = weekly_aggregate(df_pre, weekly_cols)
+        camp_week_pv = weekly_aggregate(df_camp, weekly_cols)
+
+        # compute CR (%) = verify_phone / installs * 100
+        for df_w, label in [(pre_week_pv, "Pre"), (camp_week_pv, "Campaign")]:
+            if not df_w.empty:
+                denom = df_w[installs_col].replace(0, np.nan)
+                df_w["CR (%)"] = (df_w[phone_verify_col] / denom) * 100
+                df_w["period"] = label
+
+        combined_week = pd.concat(
+            [pre_week_pv, camp_week_pv],
+            ignore_index=True
+        ) if not pre_week_pv.empty or not camp_week_pv.empty else pd.DataFrame()
+
+        if combined_week.empty:
+            st.info("No weekly data available for Install → Verify Phone CR in the selected periods.")
+        else:
+            plot_df = combined_week.pivot(index="WeekStart", columns="period", values="CR (%)")
+            st.line_chart(plot_df, height=350)
+            st.markdown("""
+This chart shows **weekly Install → Verify Phone CR (%)** for Pre vs Campaign.
+
+Use it to see:
+- Whether your acquisition during the campaign is bringing users who complete phone verification at a higher rate.
 """)
 
 
@@ -955,15 +1004,19 @@ Use these **weekly tables** to:
 - See if funnel CRs jump systematically in campaign weeks.
 - Spot weeks where lead quality (KYC / Trade / Esign concentration) is unusually high or low.
 """)
-        # Optional: grouped funnel by campaign_channel / persona / product
+
+        # Optional grouped funnel by campaign_channel / persona / product
         if group_by != "None":
             st.subheader(f"Grouped funnel lift by {group_by}")
 
             groups = df[group_by].dropna().unique().tolist()
-            groups = [g for g in groups if g not in ("", "Organic/None")] + ["Organic/None" if "Organic/None" in groups else None]
+            groups = [g for g in groups if g not in ("", "Organic/None")] + (["Organic/None"] if "Organic/None" in groups else [])
             groups = [g for g in groups if g is not None]
 
             rows = []
+            base = selected_steps[0]
+            last = selected_steps[-1]
+
             for g in groups:
                 df_pre_g = df_pre[df_pre[group_by] == g]
                 df_camp_g = df_camp[df_camp[group_by] == g]
@@ -974,9 +1027,6 @@ Use these **weekly tables** to:
                 pre_totals_g = {step: df_pre_g[step].sum() if step in df_pre_g.columns else 0 for step in selected_steps}
                 camp_totals_g = {step: df_camp_g[step].sum() if step in df_camp_g.columns else 0 for step in selected_steps}
 
-                # base → last step conversion as a simple summary metric
-                base = selected_steps[0]
-                last = selected_steps[-1]
                 pre_base = pre_totals_g.get(base, 0)
                 pre_last = pre_totals_g.get(last, 0)
                 camp_base = camp_totals_g.get(base, 0)
@@ -1001,7 +1051,6 @@ Use these **weekly tables** to:
                 st.info(f"No data to show by {group_by}.")
             else:
                 grp_df = pd.DataFrame(rows)
-                # Pretty formatting
                 for col in grp_df.columns:
                     if "CR (%)" in col or "Lift (%)" in col:
                         grp_df[col] = grp_df[col].map(format_pct)
@@ -1013,9 +1062,6 @@ Each row = one **{group_by}** bucket (e.g. channel / persona / product) with:
 - Base → Last-step CR (Pre vs Campaign)
 - % Lift
 - Base & last-step volumes
-
-This tells you, for example:
-> "Early Jobber IPO MB_Push cohorts had higher Install→Trade CR during campaign vs pre."
 """)
 
 st.markdown("---")
