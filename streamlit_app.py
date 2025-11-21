@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 # Page config
 # -------------------------------------------------
 # Add logo (top-left)
-logo_path = "/mnt/data/hdfc_sky_logo.png"  # replace with your actual file name
+logo_path = "move.png"  # replace with your actual file name
 
 st.markdown(
     """
