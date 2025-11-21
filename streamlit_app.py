@@ -331,7 +331,7 @@ uploaded_file = st.sidebar.file_uploader(
     type=["csv"]
 )
 
-default_path = "/mnt/data/HDFC_SKY_Android_Organic_Paid_13_11_25.csv"
+default_path = "HDFC_SKY_Android_Organic_Paid_13_11_25.csv"
 
 if uploaded_file is not None:
     df_raw = pd.read_csv(uploaded_file)
